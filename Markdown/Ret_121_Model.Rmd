@@ -1,0 +1,320 @@
+---
+title: "Use Mean"
+author: "AlexandeR Noll"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r, include = FALSE}
+library(dplyr)
+library(tidyr)
+library(magrittr)
+library(caret)
+library(quantreg)
+library(quantregForest)
+source("../R/Utils.R")
+```
+
+In this document, we play around a little with different models. This is more for exploring the data than building a final model.
+
+# Data preparation
+
+```{r}
+set.seed(21)
+train <- 
+    readr::read_csv("~/Desktop/Data_Science_Scale/Winton/Winton/Data/train.csv")
+train_ind <- createDataPartition(train$Ret_121, list = FALSE, p = 0.8)
+train_train <- train[train_ind, ]
+train_cv <- train[-train_ind, ]
+```
+
+We impute missing data by median:
+
+```{r}
+impute_model <-
+    preProcess(train_train, method = "medianImpute")
+train_train %<>% predict(impute_model, .) %>% ComputeMean
+train_cv %<>% predict(impute_model, .) %>% ComputeMean
+```
+
+# Fit models
+
+It is extremely important to choose the right optimization goal. In previous attempts, the least squares optimization was chosen (which was obviously wrong) and so the optimization performed worse on the training set itself.
+
+## Predict next time step
+
+Here, our goal is very humble: just try to predict the next time step.
+
+### Use autocorrelation
+
+As discussed in the document *Simplest*, there is autocorrelation at lag 1. We try to use this to predict the next time step *Ret_121*.
+
+```{r}
+ret_121_model <- rq(Ret_121 ~ Ret_120, 
+                    tau = 0.5, 
+                    data = train_train
+                    )
+```
+
+Let us evaluate the trained model against both the training set and the cross validation set to check that the results look a bit better now: 
+
+```{r}
+# Training set
+# Error of model predictions
+MAE(data.frame(obs = train_train$Ret_121, 
+               pred = predict(ret_121_model, newdata = train_train)
+               )
+    )
+
+# Error of zero prediciton
+MAE(data.frame(obs = train_train$Ret_121,
+               pred = rep(0, nrow(train_train))
+               )
+    )
+
+# Cross validation set
+# Error of model predictions
+MAE(data.frame(obs = train_cv$Ret_121, 
+               pred = predict(ret_121_model, newdata = train_cv)
+               )
+    )
+
+# Error of zero predicitons
+MAE(data.frame(obs = train_cv$Ret_121,
+               pred = rep(0, nrow(train_train))
+               )
+    )
+```
+
+So, we "outperform" the zero prediction at least a little bit.
+
+### Add more predictors
+
+In this step, we add some more predictors, in particular the ones generated in the data preparation step, i.e. the mean return, the standard deviation of the return and the median return up to that time step:
+
+```{r}
+ret_121_model <- rq(Ret_121 ~ Ret_120 + mean_return + median_return + sd_return, 
+                    tau = 0.5, 
+                    data = train_train
+                    )
+```
+
+Evaluate:
+
+```{r}
+# Training set
+# Error of model predictions
+MAE(data.frame(obs = train_train$Ret_121, 
+               pred = predict(ret_121_model, newdata = train_train)
+               )
+    )
+
+# Error of zero prediciton
+MAE(data.frame(obs = train_train$Ret_121,
+               pred = rep(0, nrow(train_train))
+               )
+    )
+
+# Cross validation set
+# Error of model predictions
+MAE(data.frame(obs = train_cv$Ret_121, 
+               pred = predict(ret_121_model, newdata = train_cv)
+               )
+    )
+
+# Error of zero predicitons
+MAE(data.frame(obs = train_cv$Ret_121,
+               pred = rep(0, nrow(train_train))
+               )
+    )
+```
+
+We see that on the training set, we significantly outperform the zero predicition model and also on the cross validation set, we perform slightly better, but there is some overfitting already.
+
+### Use all features
+
+Now, we try to use all features (*Feature_1* - *Feature_25*):
+
+```{r}
+ret_121_model <- rq(Ret_121 ~ ., 
+                    tau = 0.5, 
+                    data = train_train %>% select(Ret_121,
+                                                  Ret_MinusOne,
+                                                  Ret_MinusTwo,
+                                                  Ret_120, 
+                                                  mean_return, 
+                                                  median_return,
+                                                  sd_return,
+                                                  starts_with("Feat")
+                                                 )
+                    )
+
+```
+
+Evaluate:
+
+```{r}
+# Training set
+# Error of model predictions
+MAE(data.frame(obs = train_train$Ret_121, 
+               pred = predict(ret_121_model, newdata = train_train)
+               )
+    )
+
+# Error of zero prediciton
+MAE(data.frame(obs = train_train$Ret_121,
+               pred = rep(0, nrow(train_train))
+               )
+    )
+
+# Cross validation set
+# Error of model predictions
+MAE(data.frame(obs = train_cv$Ret_121, 
+               pred = predict(ret_121_model, newdata = train_cv)
+               )
+    )
+
+# Error of zero predicitons
+MAE(data.frame(obs = train_cv$Ret_121,
+               pred = rep(0, nrow(train_train))
+               )
+    )
+```
+
+This still gives a slight improvement and is the best model up to this point.
+
+### Quantile regression models 
+
+```{r}
+
+ret_121_model <- 
+    quantregForest(
+        x = train_train %>% 
+            select(Ret_121,
+                   Ret_MinusOne,
+                   Ret_MinusTwo,
+                   Ret_120
+                   #mean_return, 
+                   #median_return,
+                   #sd_return,
+                   #starts_with("Feat"), 
+            ),
+        y = train_train$Ret_121,
+        quantiles = c(0.5)
+    )
+```
+
+Evaluate:
+
+```{r}
+# Training set
+# Error of model predictions
+MAE(data.frame(obs = train_train$Ret_121, 
+               pred = predict(ret_121_model, 
+                              newdata = train_train %>% sample_n(1000) %>%
+                                  select(Ret_121,
+                                         Ret_MinusOne,
+                                         Ret_MinusTwo,
+                                         Ret_120
+                                         )
+                              )[ , 2]
+               )
+)
+
+# Error of zero prediciton
+MAE(data.frame(obs = train_train$Ret_121,
+               pred = rep(0, nrow(train_train))
+               )
+    )
+
+# Cross validation set
+# Error of model predictions
+MAE(data.frame(obs = train_cv$Ret_121, 
+               pred = predict(ret_121_model, 
+                              newdata = train_cv %>% sample_n(1000) %>%
+                                  select(Ret_121,
+                                         Ret_MinusOne,
+                                         Ret_MinusTwo,
+                                         Ret_120
+                                         )
+                              )[ , 2]
+               )
+)
+
+# Error of zero predicitons
+MAE(data.frame(obs = train_cv$Ret_121,
+               pred = rep(0, nrow(train_train))
+               )
+    )
+```
+
+We see that the quantile regression random forrest performs much worse. At the moment the reason is absolutely unclear to me because at least on the training set itself it should be that bad.
+
+# Make submission
+
+Now we make a submission using the baseline model for all target variables except for **Ret_121**. We use the model that has performed best on the cross validation set.
+
+## Data preparation
+
+```{r}
+train %<>% ComputeMean
+test <- 
+    readr::read_csv("~/Desktop/Data_Science_Scale/Winton/Winton/Data/test.csv") %>%
+    predict(impute_model, .) %>%
+    ComputeMean
+```
+
+```{r}
+# Build median impute model based on target variables
+impute_model <-
+    preProcess(train %>% 
+                   select(starts_with("Ret_")) %>%
+                   select(3:183),
+               method = "medianImpute")
+
+# Build empty data frame and predict median values
+target_vars <- c(paste0("Ret_", 121:180), "Ret_PlusOne", "Ret_PlusTwo")
+preds <- matrix(data = NA, nrow = 60000, ncol = length(target_vars)) %>%
+    data.frame
+colnames(preds) <- target_vars
+preds %<>% predict(impute_model, .)
+```
+
+## Build model based on all training data
+
+```{r}
+predictor_list <-
+    train %>% 
+    select(Ret_121,
+           Ret_MinusOne,
+           Ret_MinusTwo,
+           Ret_120, 
+           mean_return, 
+           median_return,
+           sd_return,
+           starts_with("Feat")
+    ) %>% 
+    colnames
+
+preds <- BuildModel(train, test, predictor_list, "Ret_121")
+write.csv(preds, file = "../Data/ret_121_many.csv", row.names = FALSE)
+```
+
+This model was submitted an it was outperformed by the baseline model. 
+
+## Another Ret_121 model
+
+Motivated by the poor performance of the last model, we try it another time; this time we just use the Variable **Ret_120** as predictor.
+
+```{r}
+preds <- BuildModel(train, test, "Ret_120", "Ret_121")
+write.csv(preds, file = "../Data/ret_121.csv", row.names = FALSE)
+```
+
+This model actually slightly outperforms the baseline.
+
+# Sessioninfos
+
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,123 @@
+---
+title: "Open Ends"
+author: "Alexander Noll"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Collect unsuccessful open ends
+
+## Predict far future
+
+Next, we try to predict the target variables **Ret_PlusTwo**. We use the same code as above with many features:
+
+### Many features
+
+```{r}
+ret_plustwo_model <- rq(Ret_PlusTwo ~ ., 
+                    tau = 0.5, 
+                    data = train_train %>% select(Ret_PlusTwo,
+                                                  Ret_MinusOne,
+                                                  Ret_MinusTwo,
+                                                  Ret_120, 
+                                                  mean_return, 
+                                                  median_return,
+                                                  sd_return,
+                                                  starts_with("Feat")
+                                                 )
+                    )
+
+```
+
+Evaluate:
+
+```{r}
+# Training set
+# Error of model predictions
+MAE(data.frame(obs = train_train$Ret_PlusTwo, 
+               pred = predict(ret_plustwo_model, newdata = train_train)
+               )
+    )
+
+# Error of zero prediciton
+MAE(data.frame(obs = train_train$Ret_PlusTwo,
+               pred = rep(0, nrow(train_train))
+               )
+    )
+
+# Cross validation set
+# Error of model predictions
+MAE(data.frame(obs = train_cv$Ret_PlusTwo, 
+               pred = predict(ret_plustwo_model, newdata = train_cv)
+               )
+    )
+
+# Error of zero predicitons
+MAE(data.frame(obs = train_cv$Ret_PlusTwo,
+               pred = rep(0, nrow(train_cv))
+               )
+    )
+```
+
+# Make submission
+
+As a second benchmark (after the R script 'Baseline.R'), let us use this kind of model to predict all outcome variables and prepare the data to be submitted on Kaggle:
+
+```{r}
+train %<>% ComputeMean
+test <- 
+    readr::read_csv("~/Desktop/Data_Science_Scale/Winton/Winton/Data/test.csv") %>%
+    predict(impute_model, .) %>%
+    ComputeMean
+```
+
+```{r}
+preds <- data.frame(foo = rep(0, nrow(test)))
+target_vars <- c(paste0("Ret_", 121:180), "Ret_PlusOne", "Ret_PlusTwo")
+FitModel <- function(target_var){
+    # Fits quantile regressio model for target variable target_var
+    #
+    # Args: target_var: character corresponding to target variable to be fitted
+    #
+    # Returns: regression quantile prediction model
+    current_mod <- 
+        rq(as.formula(paste0(target_var, " ~ .")), 
+           data = train %>% 
+               select(Ret_MinusOne,
+                      Ret_MinusTwo,
+                      Ret_120, 
+                      mean_return, 
+                      median_return,
+                      sd_return,
+                      starts_with("Feat")
+               ) %>%
+               bind_cols(train %>% select_(target_var))
+        )
+    pred <- data.frame(predict(current_mod, newdata = test))
+    colnames(pred) <- target_var
+    
+    return(pred)
+}
+
+# Kill a kitten
+for(target_var in target_vars){
+    preds %<>% bind_cols(FitModel(target_var))
+}
+
+preds %<>% 
+    select(-foo) %>%
+    gather("var_name", "pred", 1:62) %>%
+    mutate(ind = row_number() %% nrow(preds),
+           var = row_number() %/% nrow(preds) + 1) 
+
+preds$ind[preds$ind == 0] <- 60000
+preds$var[preds$ind == 60000] <- preds$var[preds$ind == 60000] - 1
+
+preds %<>% 
+    mutate(Id = paste0(ind, "_", var)) %>%
+    rename(Predicted = pred) %>%
+    select(Id, Predicted)
+write.csv(preds, file = "./Data/Simple.csv", row.names = FALSE)
+```
+
+We see that this model performs extremely poorly, way worse than just the median imputation model. We have not done a thorugh analysis of why, but there seems to be some quite massive overfitting.
